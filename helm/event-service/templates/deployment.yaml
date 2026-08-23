@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "event-service.fullname" . }}
+  labels:
+    {{- include "event-service.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "event-service.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "event-service.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            - name: DB_HOST
+              value: {{ .Values.db.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.db.port | quote }}
+            - name: DB_NAME
+              value: {{ .Values.db.name | quote }}
+            - name: DB_SSL_MODE
+              value: {{ .Values.db.sslMode | quote }}
+            - name: DB_SEARCH_PATH
+              value: {{ .Values.db.searchPath | quote }}
+            - name: SHUTDOWN_DRAIN_DELAY
+              value: {{ .Values.shutdown.drainDelay | quote }}
+            - name: SHUTDOWN_TIMEOUT
+              value: {{ .Values.shutdown.timeout | quote }}
+            # ── ค่าลับ อ่านจาก Secret ทั้งหมด ────────────────────────────────
+            # ของเดิม DSN พร้อมรหัสผ่านอยู่ใน manifest ที่ commit ขึ้น git
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.credentialsSecret }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.credentialsSecret }}
+                  key: password
+            - name: JWT_PUBLIC_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.jwt.publicKeysSecret }}
+                  key: publicKeys
+            - name: EVENT_INGEST_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.ingest.tokenSecret }}
+                  key: token
+            {{- with .Values.jwt.issuer }}
+            - name: JWT_ISSUER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.jwt.audience }}
+            - name: JWT_AUDIENCE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

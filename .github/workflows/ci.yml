@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: vertex
+          POSTGRES_PASSWORD: vertex
+          # ⚠️ ชื่อต้องมีคำว่า test — integration test ปฏิเสธฐานข้อมูลที่ไม่มีคำนี้
+          #    เพื่อกันไม่ให้เผลอรันใส่ production ตอนมี port-forward ค้างอยู่
+          POSTGRES_DB: eventtest
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U vertex"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # SQL อยู่คนละ repo — ดึงมาเพื่อเตรียมฐานข้อมูลให้ integration test
+      - name: Checkout migrations
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/vertex-migrations
+          path: .migrations
+          token: ${{ secrets.MIGRATIONS_REPO_TOKEN || github.token }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Unit test
+        run: go test -race -count=1 ./...
+
+      - name: Flyway migrate
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$PWD/.migrations/event/migration:/flyway/sql/migration:ro" \
+            -e FLYWAY_URL=jdbc:postgresql://localhost:5432/eventtest \
+            -e FLYWAY_USER=vertex -e FLYWAY_PASSWORD=vertex \
+            -e FLYWAY_SCHEMAS=event -e FLYWAY_DEFAULT_SCHEMA=event \
+            -e FLYWAY_LOCATIONS=filesystem:/flyway/sql/migration \
+            -e FLYWAY_FAIL_ON_MISSING_LOCATIONS=true \
+            -e FLYWAY_CLEAN_DISABLED=true \
+            flyway/flyway:11-alpine migrate
+
+      # gate สำคัญที่สุด: endpoint ที่เคยเปิดโล่งต้องปิดจริง
+      # และ schema ที่ Flyway สร้างต้องตรงกับที่โค้ดคาดหวัง
+      - name: Integration test
+        env:
+          TEST_DATABASE_URL: postgres://vertex:vertex@localhost:5432/eventtest?sslmode=disable&search_path=event
+        run: go test -race -count=1 -tags=integration ./... -v

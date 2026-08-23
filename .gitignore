@@ -1,0 +1,7 @@
+# image ที่ export ไว้ตอน deploy ด้วยมือ — ไม่ควรอยู่ใน git (32MB)
+*.tar
+
+# ผลลัพธ์จากการ build และ test
+/bin/
+coverage.out
+coverage.html

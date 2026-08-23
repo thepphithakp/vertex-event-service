@@ -1,0 +1,165 @@
+name: Build, Push and Deploy to K3s
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+      # ⚠️ .golangci.yml ใช้ config schema version 2 จึงต้องใช้ golangci-lint v2
+      #    action v6 ผูกกับ v1.x ที่ build ด้วย Go 1.23
+      #    อ่านโปรเจกต์ที่ target Go 1.25 ไม่ได้ → CI ล้มทั้ง pipeline
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          driver: docker-container
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Create kubeconfig from secret
+        env:
+          KUBECONFIG_CONTENT: ${{ secrets.KUBECONFIG_CONTENT }}
+        run: |
+          mkdir -p ~/.kube
+          # ใช้ printf %s แทน echo — echo แปลง backslash ใน YAML เพี้ยนได้ (O-6)
+          # ถ้าเก็บ secret เป็น base64 ให้เปลี่ยนเป็น: printf %s "$KUBECONFIG_CONTENT" | base64 -d > ~/.kube/config
+          printf '%s' "$KUBECONFIG_CONTENT" > ~/.kube/config
+          chmod 600 ~/.kube/config
+          grep -q 'apiVersion' ~/.kube/config || { echo "kubeconfig ว่างหรือไม่ valid"; exit 1; }
+
+      - name: Set KUBECONFIG environment variable
+        run: echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Verify cluster access
+        run: |
+          kubectl version --client
+          kubectl get pods -n vertex
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.12.0'
+
+      - name: Set default namespace in kubeconfig
+        run: |
+          kubectl config set-context --current --namespace vertex
+
+      - name: Deploy using Helm
+        id: helm_deploy
+        run: |
+          # pipefail สำคัญมาก — ถ้าไม่ใส่ exit code ที่ได้จะเป็นของ tee (0 เสมอ)
+          # helm upgrade ล้มเหลวแล้ว job ยังขึ้นเขียว ทำให้ deploy ไม่ขึ้นจริง
+          # โดยไม่มีใครรู้ (เกิดขึ้นจริงกับ commit 04d1a4f)
+          set -euo pipefail
+          helm upgrade --install event-service ./helm/event-service \
+            --namespace vertex \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=sha-${{ github.sha }} \
+            --set forceTimestamp=$(date +%s) | tee helm-output.txt
+
+      - name: Rollout restart if no change
+        run: |
+          set -euo pipefail
+          if grep -q 'unchanged' helm-output.txt; then
+            echo "No changes detected, restarting deployment..."
+            kubectl rollout restart deployment event-service -n vertex
+          else
+            echo "Changes detected, no restart required."
+          fi
+
+      # ยืนยันว่า deploy ขึ้นจริง ไม่ใช่แค่ helm ไม่ error
+      - name: Verify rollout
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/event-service -n vertex --timeout=180s
+
+          want="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
+          got=$(kubectl get deployment event-service -n vertex \
+            -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "ต้องการ: $want"
+          echo "ได้จริง: $got"
+          if [ "$want" != "$got" ]; then
+            echo "::error::image ที่รันอยู่ไม่ตรงกับ commit นี้ — deploy ไม่ขึ้นจริง"
+            exit 1
+          fi
