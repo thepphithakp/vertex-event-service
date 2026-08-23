@@ -68,7 +68,8 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.jwt.publicKeysSecret }}
-                  key: publicKeys
+                  # ชื่อ key ต้องตรงกับ Secret จริงที่ pet-service และ auth-service ใช้ร่วมกัน
+                  key: keys
             - name: EVENT_INGEST_TOKEN
               valueFrom:
                 secretKeyRef:
