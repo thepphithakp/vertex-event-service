@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -74,12 +75,14 @@ func NewAccessLog() fiber.Handler {
 			status = resolveErrStatus(err)
 		}
 
-		// endpoint คือ route pattern ที่ลงทะเบียนไว้ ไม่ใช่ path จริงที่มี
-		// UUID ปน — ทำให้ aggregate ตาม endpoint ใน Discover ได้
-		endpoint := c.Path()
-		if r := c.Route(); r != nil && r.Path != "" {
-			endpoint = r.Path
-		}
+		// endpoint คือ path จริงที่แทน UUID ด้วย :id แล้ว
+		//
+		// ไม่ใช้ c.Route().Path เพราะ auth middleware ของ event-service
+		// ผูกไว้ที่ระดับ group (app.Group("/api/v1/events", serviceToken))
+		// พอถูกปฏิเสธก่อนถึง route ย่อย Fiber ยังไม่ resolve ไปถึง route
+		// เต็ม — รายละเอียดเดียวกับที่เจอใน pet-service (ดู logging.go
+		// ของ pet-service comment เต็ม)
+		endpoint := normalizeEndpoint(c.Path())
 
 		attrs := []any{
 			slog.String("method", c.Method()),
@@ -122,4 +125,19 @@ func resolveErrStatus(err error) int {
 		return fe.Code
 	}
 	return fiber.StatusInternalServerError
+}
+
+// uuidSegment จับ UUID มาตรฐาน (8-4-4-4-12 hex) ไม่สนตัวพิมพ์ใหญ่เล็ก
+var uuidSegment = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// normalizeEndpoint แทนที่ segment ที่เป็น UUID ด้วย ":id"
+// ทำงานอิสระจากการ resolve route ของ Fiber โดยสิ้นเชิง
+func normalizeEndpoint(path string) string {
+	parts := strings.Split(path, "/")
+	for i, p := range parts {
+		if uuidSegment.MatchString(p) {
+			parts[i] = ":id"
+		}
+	}
+	return strings.Join(parts, "/")
 }
