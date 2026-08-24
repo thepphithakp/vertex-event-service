@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -63,7 +64,15 @@ func NewAccessLog() fiber.Handler {
 		start := time.Now()
 		err := c.Next()
 
+		// 🔴 อ่าน c.Response().StatusCode() ตรงๆ ไม่พอเมื่อ handler
+		// return error object (fiber.NewError) แทนที่จะเรียก
+		// c.Status().JSON() เอง — ErrorHandler กลางทำงาน "หลังจาก"
+		// middleware chain นี้ unwind ไปแล้ว ไม่ใช่ระหว่าง c.Next()
+		// ดูรายละเอียดเหตุผลเต็มที่ vertex-pet-service (โค้ดเดียวกัน)
 		status := c.Response().StatusCode()
+		if err != nil {
+			status = resolveErrStatus(err)
+		}
 
 		// endpoint คือ route pattern ที่ลงทะเบียนไว้ ไม่ใช่ path จริงที่มี
 		// UUID ปน — ทำให้ aggregate ตาม endpoint ใน Discover ได้
@@ -103,4 +112,14 @@ func NewAccessLog() fiber.Handler {
 		}
 		return err
 	}
+}
+
+// resolveErrStatus เดา HTTP status ที่ ErrorHandler จะกำหนดให้ error นี้
+// ต้องตรงกับ logic ใน error_handler.go ทุกประการ
+func resolveErrStatus(err error) int {
+	var fe *fiber.Error
+	if errors.As(err, &fe) {
+		return fe.Code
+	}
+	return fiber.StatusInternalServerError
 }
