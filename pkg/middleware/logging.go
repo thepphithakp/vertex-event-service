@@ -3,10 +3,21 @@ package middleware
 import (
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
+
+// maxBodyLogBytes จำกัดขนาด body ที่เขียนลง log
+// เท่ากับค่า default ของ vertex-pet-service เพื่อความสม่ำเสมอข้าม service
+const maxBodyLogBytes = 4 << 10 // 4KB
+
+// isListPath บอกว่า path นี้คืน collection ซึ่ง response อาจใหญ่มาก
+// GET /events คืน event ย้อนหลังทั้งหมดตามเงื่อนไขค้นหา
+func isListPath(path string) bool {
+	return strings.HasSuffix(path, "/events")
+}
 
 // infraPaths คือ endpoint ที่ถูกเรียกโดย k8s ไม่ใช่ผู้ใช้
 //
@@ -35,8 +46,14 @@ func SetupLogger(level string) {
 
 // NewAccessLog เขียน access log หนึ่งบรรทัดต่อหนึ่ง request
 //
-// ⚠️ จงใจไม่ log body — payload ของ event เป็นข้อมูลของผู้ใช้
-// ถ้า log ด้วยจะกลายเป็นสำเนาข้อมูลส่วนตัวชุดที่สองในระบบ log
+// 🔴 log body เฉพาะตอน error (status >= 400) เท่านั้น ไม่ใช่ทุก request
+//
+// เดิม (comment เก่า) ตั้งใจไม่ log body เลยเพราะ payload ของ event เป็น
+// ข้อมูลของผู้ใช้ กลัวว่า log จะกลายเป็นสำเนาข้อมูลส่วนตัวชุดที่สอง
+// ยังคงหลักการนั้นไว้สำหรับ request ที่สำเร็จ — เปลี่ยนเฉพาะตอน error
+// ที่ไม่มี body ให้ดูเลยจะสืบสาเหตุไม่ได้ (ปัญหาเดียวกับที่เจอใน VT-69)
+//
+// ผ่าน maskBody ก่อนเสมอ ตัดค่า token/email/password ออกแม้ตอน error
 func NewAccessLog() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		if IsInfraPath(c.Path()) {
@@ -47,9 +64,18 @@ func NewAccessLog() fiber.Handler {
 		err := c.Next()
 
 		status := c.Response().StatusCode()
+
+		// endpoint คือ route pattern ที่ลงทะเบียนไว้ ไม่ใช่ path จริงที่มี
+		// UUID ปน — ทำให้ aggregate ตาม endpoint ใน Discover ได้
+		endpoint := c.Path()
+		if r := c.Route(); r != nil && r.Path != "" {
+			endpoint = r.Path
+		}
+
 		attrs := []any{
 			slog.String("method", c.Method()),
 			slog.String("path", c.Path()),
+			slog.String("endpoint", endpoint),
 			slog.Int("status", status),
 			slog.Duration("latency", time.Since(start)),
 			slog.String("request_id", c.Get(HeaderRequestID)),
@@ -57,6 +83,17 @@ func NewAccessLog() fiber.Handler {
 		}
 		if uid, ok := c.Locals("userId").(string); ok && uid != "" {
 			attrs = append(attrs, slog.String("user_id", uid))
+		}
+
+		if status >= 400 {
+			if b := truncate(maskBody(c.Body()), maxBodyLogBytes); b != "" {
+				attrs = append(attrs, slog.String("req_body", b))
+			}
+			if !isListPath(c.Path()) {
+				if b := truncate(maskBody(c.Response().Body()), maxBodyLogBytes); b != "" {
+					attrs = append(attrs, slog.String("res_body", b))
+				}
+			}
 		}
 
 		if status >= 500 {
