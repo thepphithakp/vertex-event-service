@@ -108,3 +108,16 @@ ingest:
   tokenSecret: event-ingest-token
 
 env: {}
+
+# ให้ Prometheus มาดึง /metrics (VT-109)
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  # ⚠️ Prometheus ในคลัสเตอร์นี้ตั้ง serviceMonitorSelector ไว้ที่
+  #      matchLabels: {release: prometheus-grafana}
+  #    ไม่ใส่ label นี้ = ServiceMonitor ถูกสร้างแต่ไม่มีใครมาดึงเลย
+  #    และไม่มีอะไรฟ้อง ต้องไปสังเกตเองว่ากราฟว่าง
+  #    ตรวจได้ด้วย kubectl get prometheus -A -o jsonpath='{.items[*].spec.serviceMonitorSelector}'
+  additionalLabels:
+    release: prometheus-grafana

@@ -31,6 +31,8 @@ func NewApp(db *gorm.DB, cfg config.Config, auth middleware.AuthConfig) (*fiber.
 	// recover ต้องมาก่อนทุกอย่าง — panic ใน handler ไม่ควรทำให้ทั้ง pod ตาย
 	app.Use(recover.New())
 	app.Use(middleware.NewRequestID())
+	// metrics มาก่อน access log เพื่อให้นับ request ที่ถูกปฏิเสธตั้งแต่ต้นทางด้วย
+	app.Use(middleware.NewMetrics())
 	app.Use(middleware.NewAccessLog())
 	app.Use(cors.New())
 
@@ -39,6 +41,9 @@ func NewApp(db *gorm.DB, cfg config.Config, auth middleware.AuthConfig) (*fiber.
 	app.Get("/readyz", health.Readiness)
 	// คงไว้เพื่อความเข้ากันได้กับ monitoring เดิม
 	app.Get("/health", health.Liveness)
+	// ให้ Prometheus มาดึง — เข้าถึงได้จากในคลัสเตอร์เท่านั้น
+	// เพราะ ingress route เฉพาะ prefix /api/v1 เข้ามา
+	app.Get("/metrics", middleware.MetricsHandler())
 
 	repo := repository.NewGORMEventRepository(db)
 	svc := application.NewEventService(repo)
