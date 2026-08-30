@@ -29,6 +29,42 @@ securityContext:
 service:
   type: ClusterIP
   port: 4002
+# --- Gateway API ----------------------------------------------------------
+#
+# ⚠️ ยังปิดอยู่โดยตั้งใจ — ตอนนี้ infra/gateway/03-httproute-event.yaml เป็นเจ้าของ route
+#    ของ event-service อยู่ เปิดตรงนี้พร้อมกันจะได้ HTTPRoute สองตัวชี้ path เดียวกัน
+#
+# ลำดับที่ถูกต้องตอนย้ายมาให้ chart เป็นเจ้าของ:
+#   1. kubectl apply -f infra/gateway/05-rbac-httproute.yaml   (สิทธิ์ของ CD)
+#   2. kubectl delete -f infra/gateway/03-httproute-event.yaml
+#   3. เปลี่ยน enabled เป็น true แล้ว deploy
+httpRoute:
+  enabled: false
+  # Gateway ที่ infra/gateway/01-gateway.yaml สร้างไว้
+  parentRef:
+    name: vertex-gateway
+    # เว้นว่าง = namespace เดียวกับ release
+    namespace: ""
+    # ชื่อ listener ใน Gateway — ผูกกับ listener ตัวใดตัวหนึ่งไม่ใช่ทั้ง Gateway
+    sectionName: http
+  # ⚠️ ห้ามใส่ค่าจริงลงไฟล์นี้ — repo เป็น public
+  #    ส่งตอน deploy เหมือน ingress.host เดิม:
+  #      --set httpRoute.hostnames[0]="${{ secrets.INGRESS_HOST }}"
+  #
+  #    ระหว่างช่วงย้ายต้องส่ง "สองชื่อ" — ชื่อที่ cloudflared เขียน Host ทับให้
+  #    กับชื่อที่เบราว์เซอร์เห็นจริง ใส่ทั้งคู่ทำให้ถอด originRequest.httpHostHeader
+  #    ออกจาก cloudflared ได้ในภายหลังโดยไม่ต้องแตะ route
+  #      --set httpRoute.hostnames[1]="${{ secrets.PUBLIC_HOST }}"
+  #
+  #    ว่างไว้แล้วเปิด enabled = helm จะ fail ทันทีพร้อมข้อความบอกเหตุ
+  hostnames: []
+  # สอง path ยิงเข้า backend เดียวกัน — match ใน rule เดียวกันเป็น OR
+  paths:
+    - type: PathPrefix
+      value: /api/v1/events
+    - type: PathPrefix
+      value: /api/v1/admin/events
+
 
 resources:
   limits:
