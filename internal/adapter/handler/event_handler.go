@@ -1,16 +1,83 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 
 	"github.com/vertex/event-service/internal/application"
 	"github.com/vertex/event-service/internal/domain"
 	"github.com/vertex/event-service/internal/port"
 	"github.com/vertex/event-service/pkg/middleware"
 )
+
+// createEventRequest คือรูปแบบ JSON ที่รับจากผู้เรียก — เดิม BodyParser parse
+// ลง domain.EventLog ตรงๆ ย้าย wire format มาที่นี่ไม่ให้ domain ต้องรู้จัก
+// JSON เลย field/ชื่อเหมือนเดิมทุกตัวอักษร ไม่ให้ caller ที่ยิง event เข้ามา
+// (chat-service, pet-service ฯลฯ) พัง
+type createEventRequest struct {
+	ID             uuid.UUID       `json:"id"`
+	Timestamp      time.Time       `json:"timestamp"`
+	EventType      string          `json:"eventType"`
+	Action         string          `json:"action"`
+	ActorID        string          `json:"actorId"`
+	ActorUsername  string          `json:"actorUsername"`
+	EntityID       string          `json:"entityId"`
+	EntityType     string          `json:"entityType"`
+	Payload        json.RawMessage `json:"payload"`
+	IdempotencyKey *string         `json:"idempotencyKey,omitempty"`
+}
+
+func (r createEventRequest) toDomain() domain.EventLog {
+	return domain.EventLog{
+		ID:             r.ID,
+		Timestamp:      r.Timestamp,
+		EventType:      r.EventType,
+		Action:         r.Action,
+		ActorID:        r.ActorID,
+		ActorUsername:  r.ActorUsername,
+		EntityID:       r.EntityID,
+		EntityType:     r.EntityType,
+		Payload:        r.Payload,
+		IdempotencyKey: r.IdempotencyKey,
+	}
+}
+
+// eventLogResponse คือรูปแบบ JSON ที่ตอบกลับ — รูปแบบเดิมทุกตัวอักษร (เดิม
+// domain.EventLog มี json tag ติดอยู่กับตัวเอง)
+type eventLogResponse struct {
+	ID             uuid.UUID       `json:"id"`
+	Timestamp      time.Time       `json:"timestamp"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	EventType      string          `json:"eventType"`
+	Action         string          `json:"action"`
+	ActorID        string          `json:"actorId"`
+	ActorUsername  string          `json:"actorUsername"`
+	EntityID       string          `json:"entityId"`
+	EntityType     string          `json:"entityType"`
+	Payload        json.RawMessage `json:"payload"`
+	IdempotencyKey *string         `json:"idempotencyKey,omitempty"`
+}
+
+func toEventLogResponse(e domain.EventLog) eventLogResponse {
+	return eventLogResponse{
+		ID:             e.ID,
+		Timestamp:      e.Timestamp,
+		CreatedAt:      e.CreatedAt,
+		EventType:      e.EventType,
+		Action:         e.Action,
+		ActorID:        e.ActorID,
+		ActorUsername:  e.ActorUsername,
+		EntityID:       e.EntityID,
+		EntityType:     e.EntityType,
+		Payload:        e.Payload,
+		IdempotencyKey: e.IdempotencyKey,
+	}
+}
 
 type EventHandler struct {
 	useCase port.EventUseCase
@@ -37,10 +104,11 @@ func (h *EventHandler) RegisterAdminRoutes(r fiber.Router) {
 }
 
 func (h *EventHandler) CreateEvent(c *fiber.Ctx) error {
-	var event domain.EventLog
-	if err := c.BodyParser(&event); err != nil {
+	var req createEventRequest
+	if err := c.BodyParser(&req); err != nil {
 		return badRequest(c, "อ่าน request body ไม่ได้")
 	}
+	event := req.toDomain()
 
 	created, err := h.useCase.CreateEvent(c.UserContext(), &event)
 	if err != nil {
@@ -59,7 +127,7 @@ func (h *EventHandler) CreateEvent(c *fiber.Ctx) error {
 			"duplicate": true,
 		})
 	}
-	return c.Status(fiber.StatusCreated).JSON(event)
+	return c.Status(fiber.StatusCreated).JSON(toEventLogResponse(event))
 }
 
 func (h *EventHandler) ListEvents(c *fiber.Ctx) error {
@@ -76,8 +144,12 @@ func (h *EventHandler) ListEvents(c *fiber.Ctx) error {
 		return internalError(c, err)
 	}
 
+	items := make([]eventLogResponse, len(events))
+	for i, e := range events {
+		items[i] = toEventLogResponse(e)
+	}
 	return c.JSON(fiber.Map{
-		"data":   events,
+		"data":   items,
 		"total":  total,
 		"limit":  len(events),
 		"offset": f.Offset,

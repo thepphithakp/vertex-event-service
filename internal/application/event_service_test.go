@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"gorm.io/datatypes"
 
 	"github.com/vertex/event-service/internal/domain"
 	"github.com/vertex/event-service/internal/port"
@@ -84,7 +83,7 @@ func TestCreateEvent_Rejects(t *testing.T) {
 		{
 			"payload ใหญ่เกิน",
 			domain.EventLog{EventType: "x", Action: "x",
-				Payload: datatypes.JSON(`{"a":"` + strings.Repeat("x", maxPayloadBytes) + `"}`)},
+				Payload: []byte(`{"a":"` + strings.Repeat("x", maxPayloadBytes) + `"}`)},
 			"payload",
 		},
 	}

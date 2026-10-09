@@ -1,6 +1,6 @@
 module github.com/vertex/event-service
 
-go 1.25.14
+go 1.26.9
 
 require (
 	github.com/gofiber/adaptor/v2 v2.2.1
