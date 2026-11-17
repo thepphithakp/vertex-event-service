@@ -1,6 +1,6 @@
 module github.com/vertex/event-service
 
-go 1.26.9
+go 1.26.11
 
 require (
 	github.com/gofiber/adaptor/v2 v2.2.1
@@ -15,7 +15,7 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-sql-driver/mysql v1.8.1 // indirect

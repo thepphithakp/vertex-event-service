@@ -1,5 +1,5 @@
 # --- Build ---
-FROM golang:1.26.9-alpine AS builder
+FROM golang:1.26.11-alpine AS builder
 RUN apk add --no-cache git ca-certificates tzdata
 WORKDIR /app
 
