@@ -62,13 +62,14 @@ make lint              # ใช้ docker ถ้าไม่มี golangci-lint
 
 ## deploy
 
-GitHub Actions ทำให้อัตโนมัติเมื่อ push ขึ้น `main`
-ต้องมี secret ใน repo: `KUBECONFIG_CONTENT` และ `MIGRATIONS_REPO_TOKEN`
+GitOps ด้วย Argo CD — GitHub Actions ไม่แตะ cluster
+เมื่อ push ขึ้น `main` CI จะ build image แล้ว commit `image.tag` ใหม่เข้า
+[`vertex-gitops`](https://github.com/thepphithakp/vertex-gitops) (`apps/event-service/values.yaml`)
+จากนั้น Argo CD (https://argocd.pluem.me) sync เข้า namespace `vertex` เอง
 
-deploy เองก็ได้:
+ต้องมี secret ใน repo: `GITOPS_DEPLOY_KEY` (deploy key ที่เขียน vertex-gitops ได้) และ `MIGRATIONS_REPO_TOKEN`
 
-```
-helm upgrade --install event-service ./helm/event-service -n vertex \
-  --set image.repository=ghcr.io/thepphithakp/vertex-event-service \
-  --set image.tag=sha-$(git rev-parse HEAD)
-```
+⚠️ chart ที่ Argo ใช้คือสำเนาใน `vertex-gitops/charts/event-service` ถ้าแก้ `helm/event-service`
+ต้องแก้ที่นั่นให้ตรงกันด้วย
+
+rollback: revert commit ของ tag ใน `vertex-gitops`

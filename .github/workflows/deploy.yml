@@ -1,4 +1,4 @@
-name: Build, Push and Deploy
+name: Build, Push and Hand off to Argo CD
 
 on:
   push:
@@ -88,105 +88,76 @@ jobs:
           cache-to: type=gha,mode=max
 
 
-  deploy:
+  # ---------------------------------------------------------------------------
+  # ส่งมอบให้ Argo CD — แก้ image tag ใน vertex-gitops แล้วปล่อยให้ Argo sync เอง
+  # ---------------------------------------------------------------------------
+  # CI ไม่มี kubeconfig และไม่แตะ cluster อีกแล้ว ผลของ deploy ดูที่ Argo CD
+  # (https://argocd.pluem.me) ไม่ใช่ที่ job นี้ — job เขียวแปลว่า tag ถูก push แล้วเท่านั้น
+  #
+  # ⚠️ ใช้ deploy key ที่เขียนได้เฉพาะ repo vertex-gitops (secret GITOPS_DEPLOY_KEY)
+  #    GITHUB_TOKEN เขียนข้าม repo ไม่ได้ และไม่อยากใช้ PAT ที่กว้างเกินจำเป็น
+  update-gitops:
     runs-on: ubuntu-latest
     needs: build-and-push
+    # เขียนไฟล์เดียวกัน ถ้าสอง push ชนกันให้ต่อคิว ไม่ยกเลิกตัวที่รออยู่
+    concurrency:
+      group: gitops-event-service
+      cancel-in-progress: false
     steps:
-      - name: Checkout repository
+      - name: Checkout vertex-gitops
         uses: actions/checkout@v4
-      
-      - name: Create kubeconfig from secret
+        with:
+          repository: thepphithakp/vertex-gitops
+          ref: main
+          ssh-key: ${{ secrets.GITOPS_DEPLOY_KEY }}
+
+      - name: Bump image tag
         env:
-          KUBECONFIG_CONTENT: ${{ secrets.KUBECONFIG_CONTENT }}
-        run: |
-          mkdir -p ~/.kube
-          # ใช้ printf %s แทน echo — echo แปลง backslash ใน YAML เพี้ยนได้ (O-6)
-          # ถ้าเก็บ secret เป็น base64 ให้เปลี่ยนเป็น: printf %s "$KUBECONFIG_CONTENT" | base64 -d > ~/.kube/config
-          printf '%s' "$KUBECONFIG_CONTENT" > ~/.kube/config
-          chmod 600 ~/.kube/config
-          grep -q 'apiVersion' ~/.kube/config || { echo "kubeconfig ว่างหรือไม่ valid"; exit 1; }
-
-      - name: Set KUBECONFIG environment variable
-        run: echo "KUBECONFIG=$HOME/.kube/config" >> $GITHUB_ENV
-
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'v1.28.0'
-
-      - name: Verify cluster access
-        run: |
-          kubectl version --client
-          kubectl get pods -n vertex
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-        with:
-          version: 'v3.12.0'
-
-      - name: Set default namespace in kubeconfig
-        run: |
-          kubectl config set-context --current --namespace vertex
-
-      - name: Deploy using Helm
-        id: helm_deploy
-        run: |
-          # pipefail สำคัญมาก — ถ้าไม่ใส่ exit code ที่ได้จะเป็นของ tee (0 เสมอ)
-          # helm upgrade ล้มเหลวแล้ว job ยังขึ้นเขียว ทำให้ deploy ไม่ขึ้นจริง
-          # โดยไม่มีใครรู้ (เกิดขึ้นจริงกับ commit 04d1a4f)
-          set -euo pipefail
-          helm upgrade --install event-service ./helm/event-service \
-            --namespace vertex \
-            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
-            --set image.tag=sha-${{ github.sha }} \
-            --set forceTimestamp=$(date +%s) | tee helm-output.txt
-
-      - name: Rollout restart if no change
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          TAG: sha-${{ github.sha }}
+          SRC_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
         run: |
           set -euo pipefail
-          if grep -q 'unchanged' helm-output.txt; then
-            echo "No changes detected, restarting deployment..."
-            kubectl rollout restart deployment event-service -n vertex
-          else
-            echo "Changes detected, no restart required."
+          f=apps/event-service/values.yaml
+          yq -i '.image.repository = strenv(IMAGE) | .image.tag = strenv(TAG)' "$f"
+
+          if git diff --quiet; then
+            echo "tag ใน gitops เป็น $TAG อยู่แล้ว ไม่มีอะไรต้อง commit"
+            exit 0
           fi
 
-      # ยืนยันว่า deploy ขึ้นจริง ไม่ใช่แค่ helm ไม่ error
-      - name: Verify rollout
-        run: |
-          set -euo pipefail
-          kubectl rollout status deployment/event-service -n vertex --timeout=180s
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(event-service): image ${TAG:0:11}" -m "$SRC_URL"
 
-          want="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}"
-          got=$(kubectl get deployment event-service -n vertex \
-            -o jsonpath='{.spec.template.spec.containers[0].image}')
-          echo "ต้องการ: $want"
-          echo "ได้จริง: $got"
-          if [ "$want" != "$got" ]; then
-            echo "::error::image ที่รันอยู่ไม่ตรงกับ commit นี้ — deploy ไม่ขึ้นจริง"
-            exit 1
-          fi
+          # push ชนกับ commit ของ service อื่นได้ ให้ rebase แล้วลองใหม่
+          for i in 1 2 3; do
+            git push origin HEAD:main && exit 0
+            git pull --rebase origin main
+          done
+          echo "::error::push เข้า vertex-gitops ไม่สำเร็จหลังลอง 3 ครั้ง"
+          exit 1
 
   # ---------------------------------------------------------------------------
-  # แจ้งผล deploy เข้า Discord
+  # แจ้งผลการส่งมอบเข้า Discord
   # ---------------------------------------------------------------------------
   # if: always() จำเป็น — ไม่งั้น job นี้จะรันเฉพาะตอน deploy สำเร็จ
   # ซึ่งกลับหัวกลับหางกับสิ่งที่อยากได้ เพราะกรณีที่ต้องรีบรู้คือตอนมันล้ม
   #
-  # needs.deploy.result เป็น skipped ได้ด้วย แปลว่า job ก่อนหน้าล้มจน deploy
-  # ไม่ได้รันเลย ต้องนับเป็นความล้มเหลว ไม่ใช่ปล่อยผ่านเงียบๆ
+  # needs.update-gitops.result เป็น skipped ได้ด้วย แปลว่า job ก่อนหน้าล้มจน
+  # ไม่ได้ส่งมอบเลย ต้องนับเป็นความล้มเหลว ไม่ใช่ปล่อยผ่านเงียบๆ
   #
   # ⚠️ webhook URL อยู่ใน secret DISCORD_DEPLOY_WEBHOOK เท่านั้น
   #    repo นี้เป็น public ห้ามใส่ลงไฟล์เด็ดขาด
   notify:
     runs-on: ubuntu-latest
-    needs: deploy
+    needs: update-gitops
     if: always()
     steps:
-      - name: แจ้งผล deploy เข้า Discord
+      - name: แจ้งผลการส่งมอบเข้า Discord
         env:
           WEBHOOK: ${{ secrets.DISCORD_DEPLOY_WEBHOOK }}
-          RESULT: ${{ needs.deploy.result }}
+          RESULT: ${{ needs.update-gitops.result }}
           SERVICE: event-service
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
@@ -200,11 +171,11 @@ jobs:
           fi
 
           case "$RESULT" in
-            success)   color=3066993;  icon="✅"; text="deploy สำเร็จ" ;;
-            failure)   color=15158332; icon="❌"; text="deploy ล้มเหลว" ;;
-            cancelled) color=9807270;  icon="⚪"; text="deploy ถูกยกเลิก" ;;
-            skipped)   color=15158332; icon="❌"; text="deploy ไม่ได้รัน — ขั้นก่อนหน้าล้ม" ;;
-            *)         color=9807270;  icon="❔"; text="deploy จบด้วยสถานะ $RESULT" ;;
+            success)   color=3066993;  icon="✅"; text="ส่งมอบให้ Argo CD แล้ว" ;;
+            failure)   color=15158332; icon="❌"; text="ส่งมอบให้ Argo CD ล้มเหลว" ;;
+            cancelled) color=9807270;  icon="⚪"; text="ส่งมอบถูกยกเลิก" ;;
+            skipped)   color=15158332; icon="❌"; text="ไม่ได้ส่งมอบ — ขั้นก่อนหน้าล้ม" ;;
+            *)         color=9807270;  icon="❔"; text="ส่งมอบจบด้วยสถานะ $RESULT" ;;
           esac
 
           # สร้าง JSON ด้วย jq ไม่ใช่ต่อ string เอง
@@ -229,7 +200,7 @@ jobs:
              }]}' > payload.json
 
           # --fail-with-body ทำให้ job นี้แดงถ้า Discord ปฏิเสธ
-          # deploy ที่สำเร็จไปแล้วไม่ถูกย้อน แต่จะไม่เงียบว่าแจ้งเตือนไม่ออก
+          # การส่งมอบที่สำเร็จไปแล้วไม่ถูกย้อน แต่จะไม่เงียบว่าแจ้งเตือนไม่ออก
           curl --fail-with-body -sS -X POST \
             -H 'Content-Type: application/json' \
             -d @payload.json "$WEBHOOK"
